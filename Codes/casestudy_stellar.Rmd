@@ -1,0 +1,494 @@
+---
+title: "Stellar Classification - Case Study"
+author: "Ricardo Vazquez Alvarez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+\vspace{25pt}
+
+# Stellar Classification of stars and quasars.
+
+\vspace{20pt}
+
+#### **Done by Ricardo Vazquez Alvarez**
+
+
+
+
+
+
+Stars and quasi-stars are two different celestial objects that exhibit similar behaviors when it comes to the perspective of a telescope on earth. Because, to the naked eye, they both look almost the same. Physically, although, they are not the same and exhibit different electromagnetic wavelengths that are not so easy to classify between the two. 
+
+\vspace{15pt}
+
+<center>
+![Quasar and Star image comparison (taken from https://www.quora.com/What-is-the-difference-between-a-quasar-and-a-star)](quasar-star.jpeg)
+</center>
+
+\vspace{15pt}
+
+
+Stars are spheres of plasma that are held together by gravity. Mainly composed of gas, stars have their own life cycle and are created by large clouds of gas and dust called molecular clouds. 
+
+Quasars are created by a supermassive black hole and also have a mass ranging from millions to tens of billions of solar masses [1]. They are also surrounded by a gaseous accretion disc. The following image shows just how a quasi star looks like.
+
+
+\vspace{0.5cm}
+<center>
+![Quasar example (red and blue quasar). Taken from https://ras.ac.uk/news-and-press/research-highlights/astronomers-reveal-true-colours-evolving-galactic-beasts](quasars.jpg)
+</center>
+[1] https://en.wikipedia.org/wiki/Quasar
+
+
+\vspace{0.5cm}
+
+**The objective of this case study is to classify correctly between quasi-stars and stars.** 
+
+
+This is important to do since identifying correctly the quasars from stars allow us to get insights into super massive black holes and how quasars are born. Not only that but by classifying stars, scientists can study more about them and for example their life cycles and identify the different types of stars that we have in our solar system.
+
+
+***Inherent properties of stars and quasars:***
+
+In general, stars have lower redshifts (shift in light wavelength as objects move away from the telescope / observer) and specific color patterns, meanwhile higher redshifts corresponds to quasars. We will try to classify the two through the use of their color patterns instead of just a redshift. Because looking at the color patterns is not so trivial to classify between a star and a quasar it is best to use a logistic regression model with Monte-Carlo Markov Chain methods to find the posterior of our coefficients as well as the posterior distribution of a new observation. Not only will this give us insights as to what our observation can be but also the uncertainty lying in the measurement and identification.
+
+
+
+
+
+
+## Preprocessing and Data Explanation
+
+To begin with the case study, we should first analyze the data and explore the columns.
+
+For the sake of simplicity, most of the columns in the data set were IDs corresponding to the identifier of the object or the number of scan. These were all removed as they held no interest in the classification of stars.
+
+
+
+
+
+```{r}
+library(reshape2)
+library(ggplot2)
+library(GGally)
+```
+
+```{r}
+
+# Reading the csv file
+stars = read.csv("star_classification.csv", sep=',')
+
+```
+
+
+
+Doing a summary of our data set. This way we can see what is important to keep in order to correctly classify between a star and a quasar.
+```{r}
+summary(stars)
+
+```
+
+
+As we can see from the above, there are many columns that include IDs or are just irrelevant for our logistic regression problem.
+
+
+The following columns will be removed:
+
+```{r}
+
+columns_to_remove <- c("obj_ID", "run_ID", "rerun_ID", "cam_col", "spec_obj_ID", "plate", "fiber_ID", "MJD", "field_ID")
+
+# Remove the columns from the data frame
+stars <- stars[, setdiff(names(stars), columns_to_remove)]
+
+```
+
+Now, because we have that the data set includes also galaxies as a part of the classification problem, we want to only include the Stars and Quasars in order to turn them into 1s and 0s for logistic regression. We must remove all rows corresponding to Galaxy as the class.
+
+```{r}
+stars = stars[stars$class != 'GALAXY',]
+
+```
+
+
+```{r}
+print(levels(as.factor(stars$class)))
+
+# Turning the classes into 1s and 0s
+stars$class = as.numeric(as.factor(stars$class))-1
+
+```
+
+```{r}
+
+summary(stars)
+```
+
+### **Data explanation**
+
+Now that we have removed irrelevant columns we can now start to explain the remaining features / predictors.
+
+* **alpha** - Right ascension. Represents the horizontal position of an object in the sky (longitude on earth).
+* **delta** - Declination. Vertical position of an object in the sky, similar to latitude on Earth.
+* **redshift** - shift in the wavelengths as objects move away from the observer (Quasars exhibit higher redshift values since they are further away from us on earth).
+
+**Specific bands in the electromagnetic spectrum (Color signature for each object):**
+
+Telescopes with these filters are pointed at astronomical objects and light is passed from the object (star or quasar) to the filter and is captured by sensors. Intensity of light within each filter is then measured with this sensor.
+
+* **u** - Ultraviolet filter. Captures shorter wavelengths.
+* **g** - Green filter. Captures wavelengths in the green range of visible spectrum.
+* **r** - Red filter.
+* **i** - Wavelengths in the near-infrared range.
+* **z** - Longer wavelengths in the infrared range.
+
+* **class** - Whether the observation is a Quasar or Star.
+
+
+
+
+Seeing as to how we have a minimum of values for columns u, g, and z as -9999.0 this was most probably done to show that a value was not captured, therefore we treat it as an NA value. Therefore, we should remove these rows from the data set so as to not skew the posterior distribution that we will get from the MCMC sampling.
+
+
+```{r}
+stars = stars[stars$u != -9999.00,]
+stars = stars[stars$g != -9999.00,]
+stars = stars[stars$z != -9999.00,]
+```
+
+
+
+
+Next, we want to see what columns are correlated to the actual class we want to predict:
+
+```{r}
+ggcorr(stars, label=T)
+
+```
+
+
+We can see that redshift is negatively correlated with the class by -0.8. Meanwhile all r,i,z, g are also relevant to the classification but are negatively correlated. We can most probably use the redshift column to predict the positive class, although because of the high correlation we need to make sure that it won't over predict a certain class. Meanwhile the other predictors can be used to predict the negative class.
+
+A boxplot of each relevant feature can help us in seeing how well the classes respond to these predictors.
+
+To begin we have the ultraviolet filter. Clearly there is a distinction between the classes. This means that we can use this column.
+
+```{r}
+# Can be used
+boxplot(stars$u~stars$class)
+
+
+```
+
+
+
+
+Looking at the green filter, there is also a distinction between the first and second class. Showing that we can also use this column.
+
+```{r}
+# Can be used
+boxplot(stars$g~stars$class)
+
+
+```
+
+
+Red filter is similar to the green in distinguishing between the classes.
+
+```{r}
+# Can be used
+boxplot(stars$r~stars$class)
+
+```
+
+Near Infrared filter also shows the same patterns as the other previous filters.
+
+
+```{r}
+# Can be used
+boxplot(stars$i~stars$class)
+
+
+```
+
+Infrared filter is also similar to the other filters.
+
+```{r}
+# Can be used
+boxplot(stars$z~stars$class)
+```
+
+
+There is a clear distinction between the redshift in both classes. This means that we can directly use this column to predict our class. Although firstly we should plot the values to see how well separated the classes truly are.
+```{r}
+# May overpower the classification
+boxplot(stars$redshift~stars$class)
+
+
+```
+
+
+Plotting the class vs the redshift column. 
+
+
+
+```{r}
+plot(stars$redshift, stars$class)
+```
+
+
+
+As we can see from the above plot, most of the 0 values for the class (quasars) have redshift values, meanwhile there is only one point in the star class that contains a redshift value. Therefore we cannot use this to correctly classify the classes. Since this occurs we should not use this column (too much bias in our results).
+
+Not only that, but if we use the redshift as a part of the predictors for MCMC logistic regression, the algorithm will return an error saying it could not compute the betas for each class (it does not converge).
+
+Lets plot the other columns with respect to the class:
+
+```{r}
+plot(stars$u, stars$class)
+plot(stars$g, stars$class)
+plot(stars$i, stars$class)
+plot(stars$r, stars$class)
+plot(stars$z, stars$class)
+
+```
+
+Now there is a clearer separation of the classes, although the separation is not as good as one can hope, possibly by adding all the columns together we can change the separation to be even better.
+
+```{r}
+plot(stars$u +  stars$g + stars$r +stars$i + stars$z, stars$class)
+```
+
+
+
+Finally, we can see that the alpha and delta columns are not indicative at all of the class (there is no clear separation).
+```{r}
+# Not indicative of the class
+boxplot(stars$alpha~stars$class)
+```
+
+
+```{r}
+# Not indicative of the class
+boxplot(stars$delta~stars$class)
+```
+
+
+
+
+Obtaining only a subset of the data so as to not have the MCMC algorithm running for too much time.
+```{r}
+
+quas_copy = stars[stars$class != '1',]
+star_copy = stars[stars$class != '0',]
+
+quas = quas_copy[1:500,]
+
+star_class=star_copy[1:500,]
+
+stars = rbind(quas, star_class)
+
+summary(stars)
+```
+
+
+### **Monte Carlo Markov Chain**
+
+Using Markov Chain Monte Carlo in order to sample from the posteriors:
+
+```{r}
+library(MCMCpack)
+```
+
+### **How it works:**
+
+The method being used to calculate the posterior densities of the betas is a generalized linear model, specifically the logistic regressor. This means that in obtaining our model we get a probability of an observation being in a certain class.
+
+Typically, in Machine Learning, the basic logistic regressor uses a sigmoid function and if the probability is higher that 0.5, it is of the positive class, then if it is lower than or equal it belongs to the negative / null class. Therefore, there is no uncertainty in this prediction other than the usual performance metrics we use such as accuracy (true vs predicted) or RMSE. 
+
+But in logistic regression using the Bayesian approach, we define a likelihood as the Bernoulli distribution (due to the type of data we have). We are no longer making point estimates but rather estimating parameters of the model considering probability distributions.
+
+Where the following is the likelihood function to be done with our observations.
+
+$$Y \;| \;x_{i}, \beta  \sim \text{Bernoulli}\;(p)$$
+
+Where $p_{i}$ is the probability of the observation being a star for the $i$-th observation. This represents a function called the log odds:
+
+$$log\left( \dfrac{p}{1-p}\right) = \beta_{0}\;+\;\beta_{1}x_1 \;+\; \;...\; \;+\; \beta_{k} x_{k} = \beta_{0} \;+\; \sum_{i=1}^{K}\beta_{i}x_{i}$$
+
+
+Where the coefficients ($\beta_{i;0}$ including 0) are all random variables with their own probability distributions. Therefore, given the data (hence the likelihood) and the prior, we will obtain the posterior distribution.
+
+
+We need MCMC sampling since we do not have a way of calculating directly the posterior (not a closed form). 
+
+```{r}
+predictors <- c("u","g", "r", "i", "z", "alpha", "delta")
+
+predictors = paste(predictors, collapse = " + ")
+formula <- as.formula(paste("class ~ ", predictors))
+
+mcmc_output <- MCMClogit(formula, data = stars, thin=10, burnin=1000, mcmc=40000)
+
+summary(mcmc_output)
+```
+
+
+What can be seen from the above summary is that both the alpha and delta columns cannot be used since they are not significant. In their quantiles we see that they both include the value of 0. Not only that but they are very narrow with values that are very small for the betas. Therefore removing them is the best option. This was obvious from the boxplot as well since it showed no correlation between the distinct classes.
+
+Another variable that is not significant is the z column which also includes 0 in the quantile. This one should be removed.
+
+
+```{r}
+predictors <- c("u", 'g', "i", 'r')
+
+predictors = paste(predictors, collapse = " + ")
+formula <- as.formula(paste("class ~ ", predictors))
+
+mcmc_output <- MCMClogit(formula, data = stars, thin=10, burnin=1000, mcmc=20000)
+
+summary(mcmc_output)
+```
+The most significant predictors here are the u and i column since they stray away from 0 most. It may be good to try to use only u and i to see if we can get a simpler model, and also try and make the intercept quantile more narrow.
+
+
+
+
+Ultimately, the best predictors found are the `u` column and `i` columns which provide a reasonably statistically significant quantile that are not so wide.
+```{r}
+predictors <- c("u", "i")
+
+predictors = paste(predictors, collapse = " + ")
+formula <- as.formula(paste("class ~ ", predictors))
+
+mcmc_output <- MCMClogit(formula, data = stars, thin=10, burnin=1000, mcmc=20000)
+
+summary(mcmc_output)
+
+
+```
+
+
+
+Plotting the traces and the posterior densities of each parameter
+```{r}
+plot(mcmc_output)
+```
+
+
+We can see now that none of the values include 0 in their quantiles and therefore they are significant. This means that, we are only using u and i as predictors to the classes.
+
+
+
+Lets check the autocorrelation to see if we need to add more thinning to the MCMC Algorithm.
+
+
+
+```{r}
+
+acf(mcmc_output)
+
+```
+
+
+Clearly, there is no autocorrelation for the results which means that further thinning is not required (a thinning of 10 was sufficient).
+
+Not having autocorrelation is incredibly important because this means that the current samples in a sequence are not correlated with the previous samples. This also means that we are more precisely calculating the confidence intervals and are also exploring more effectively the data, providing independent samples (for better statistical estimates).
+
+
+
+
+After doing so, it may be good to check the scatter plot of our data using just the mean values as the betas for our two columns. This would be using the latest model (using just 'u' and 'i' as our predictors). Therefore to roughly check the separation between classes we will be using the mean.
+
+```{r}
+
+beta_mean = 13.74
+
+plot((0.6104)*stars$u + (-1.3647)*stars$i + beta_mean, stars$class,
+     xlab = 'Predictors with MCMC mean',
+     ylab = 'Class',
+     main = 'Class Separation Plot')
+```
+
+
+
+
+Now we see somewhat of a clearer separation between classes as opposed to when we had plotted the class separately by the variables.
+
+
+
+
+
+Lets try and predict some row in our data that was not used in the MCMC sample.
+
+
+```{r}
+observation_quas = quas_copy[510,]
+
+observation_star =star_copy[510,]
+
+observation_star_input = c(1,observation_star$u, observation_star$i)
+
+observation_quas_input = c(1,observation_quas$u, observation_quas$i)
+```
+
+
+
+
+
+```{r}
+print(paste("Predicting the observation with class", observation_quas$class))
+
+mcmc_samples <- as.mcmc(mcmc_output)  # Convert to 'mcmc' object for easy manipulation
+coef_samples <- as.matrix(mcmc_samples)  # Get the samples in matrix form
+
+log_odds <- coef_samples %*% as.matrix(observation_quas_input)
+probabilities <- 1 / (1 + exp(-log_odds))
+plot(density(probabilities))
+
+```
+
+The above posterior density shows that it is highly unlikely that our observation is a star. This is important to see since we did indeed input a quasar row into the MCMC output. Therefore, although it does not tell us with certainty that it is a quasar (it does not simply output a 0), it does tell us that it is highly unlikely that it will be a star. Therefore, we do not just get a number as output but an uncertainty associated with it.
+
+
+Trying to predict the a row with a star as class:
+```{r}
+print(paste("Predicting the row with class", observation_star$class))
+
+mcmc_samples <- as.mcmc(mcmc_output)  # Convert to 'mcmc' object for easy manipulation
+coef_samples <- as.matrix(mcmc_samples)  # Get the samples in matrix form
+
+log_odds <- coef_samples %*% as.matrix(observation_star_input)
+probabilities <- 1 / (1 + exp(-log_odds))
+plot(density(probabilities))
+
+```
+
+We can see from the plotted posterior that the probability of it being 1 is very high. Therefore it is correctly telling us that the observation is most likely a star. There is still some uncertainty with respect to this prediction.
+
+
+
+## Conclusions:
+
+In this case study we applied a logistic regression model to the binary classification data set for stars and quasars in order to try and find the posterior density of the betas associated to the intercept and the predictors used in the model. With this we were able to obtain distributions that provided insight into exactly how each predictor used contributed to the classification of a star (class 1).
+
+We also saw that the way that this was done was by assuming a Bernoulli distribution on the likelihood and that the MCMClogit function applies by default a normal prior (mean = 0 and large variance).
+
+Therefore, we ultimately end up with a probability distribution for the posterior for each of the coefficients. Hence, we see the possible values that the betas can take, instead of giving just a point estimate. 
+
+Finally, when using new observations (not used in the MCMC algorithm) we saw that it was correctly providing insights into our new observations as with the quasar case it showed that the probability distribution of finding a star leaned more on values less than 0.5. Meanwhile for the observation of the star, it was very sure that it was a star (0.82-0.93 probability density values).
+
+
+### Differences between Machine Learning and Bayesian logistic regression:
+
+
+As we can see from the MCMC logit output, what we get is not a definite value for the betas of the regression model but rather a range of values that it can take (a posterior density for each predictor and intercept). There is a lot of value to this since in machine learning we usually predict the value and then calculate the accuracy based off of what our training set (or validation set) was. Essentially it is just an optimization problem that attempts to minimize the error with respect to the training set. 
+
+In Bayesian logistic regression, we do not obtain a point estimate but rather a posterior distribution for each of the betas. Telling us that we cannot say with absolute certainty that the values the betas can take are exactly a number, but rather a range of numbers. This provides us with the uncertainty we have in our actual predictions. Which is not something that machine learning tells us.
+
+From the posterior densities we can arrive to the conclusions that the prediction will be a certain class, but we know how uncertain we are about this prediction.
+
+
+
+
